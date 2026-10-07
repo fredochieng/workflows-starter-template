@@ -1,65 +1,78 @@
-import { WorkflowEntrypoint, WorkflowStep } from "cloudflare:workers";
-import type { WorkflowEvent } from "cloudflare:workers";
+import {
+  WorkflowEntrypoint,
+  type WorkflowEvent,
+  type WorkflowStep,
+} from "cloudflare:workers";
 
-/**
- * This workflow showcases:
- * - Durable step execution with step.do
- * - Time-based delays with step.sleep
- * - Interactive pausing with step.waitForEvent
- * - Data flow between steps
- *
- * @see https://developers.cloudflare.com/workflows
- */
-export class MyWorkflow extends WorkflowEntrypoint<
-	Env,
-	Record<string, unknown>
-> {
-	async run(event: WorkflowEvent<Record<string, unknown>>, step: WorkflowStep) {
-		const instanceId = event.instanceId;
+export type LeadPayload = {
+  tenantId?: string;
+  name?: string;
+  email?: string;
+  company?: string;
+  budget?: number;
+  interest?: "low" | "medium" | "high";
+};
 
-		// Notify Durable Object of step progress. Called outside step.do, so this
-		// operation may repeat. Safe here because updateStep is idempotent.
-		// Refer to: https://developers.cloudflare.com/workflows/build/rules-of-workflows/
-		const notifyStep = async (
-			stepName: string,
-			status: "running" | "completed" | "waiting",
-		) => {
-			try {
-				const doId = this.env.WORKFLOW_STATUS.idFromName(instanceId);
-				const stub = this.env.WORKFLOW_STATUS.get(doId);
-				await stub.updateStep(stepName, status);
-			} catch {
-				// Silently fail
-			}
-		};
+export class MyWorkflow extends WorkflowEntrypoint<Env, LeadPayload> {
+  async run(event: WorkflowEvent<LeadPayload>, step: WorkflowStep) {
+    const lead = event.payload || {};
 
-		// Step 1: Basic step - shows step.do usage
-		await notifyStep("process data", "running");
-		const result = await step.do("process data", async () => {
-			await new Promise((resolve) => setTimeout(resolve, 1000));
-			return { processed: true, timestamp: Date.now() };
-		});
-		await notifyStep("process data", "completed");
+    // Step 1: Start and parse lead
+    await step.do("1. Start workflow", async () => ({
+      tenantId: lead.tenantId ?? "default-tenant",
+      startedAt: new Date().toISOString(),
+    }));
 
-		// Step 2: Sleep step - shows step.sleep for delays
-		await notifyStep("wait 2 seconds", "running");
-		await step.sleep("wait 2 seconds", "2 seconds");
-		await notifyStep("wait 2 seconds", "completed");
+    // Step 2: Calculate lead score with custom retry configuration
+    const score = await step.do(
+      "2. Calculate lead score",
+      {
+        retries: {
+          limit: 3,
+          delay: "5 seconds",
+          backoff: "exponential",
+        },
+      },
+      async () => {
+        let points = 10;
+        if (lead.company?.trim()) points += 20;
+        if ((lead.budget ?? 0) >= 100_000) points += 40;
+        if (lead.interest === "high") points += 40;
+        return Math.min(points, 100);
+      }
+    );
 
-		// Step 3: Wait for event - shows interactive step.waitForEvent
-		await notifyStep("wait for approval", "waiting");
-		const approval = await step.waitForEvent("wait for approval", {
-			type: "user-approval",
-			timeout: "60 minutes",
-		});
-		await notifyStep("wait for approval", "completed");
+    // Step 3: Conditional Branching & Dummy CRM Sync
+    if (score >= 50) {
+      await step.do("3a. Sync to Premium CRM (Mock)", async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        return { tier: "Enterprise", synced: true };
+      });
 
-		// Step 4: Final step
-		await notifyStep("final", "running");
-		await step.do("final", async () => {
-			console.log("Results:", { result, approval: approval.payload });
-			await new Promise((resolve) => setTimeout(resolve, 1000));
-		});
-		await notifyStep("final", "completed");
-	}
+      // Step 4: Human-in-the-loop approval gate for high-value leads
+      const approvalEvent = (await step.waitForEvent("3b. Wait for Manager Approval", {
+        type: "manager-approval",
+        timeout: "1 hour",
+      })) as { payload?: { approved?: boolean }; approved?: boolean };
+
+      // Safely extract approval status from either wrapper structure
+      const isApproved = approvalEvent.payload?.approved ?? approvalEvent.approved;
+
+      if (!isApproved) {
+        return { status: "rejected", message: "Manager declined high-value lead" };
+      }
+    } else {
+      await step.do("3c. Sync to Standard Pool (Mock)", async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        return { tier: "Standard", synced: true };
+      });
+    }
+
+    // Step 5: Finish workflow
+    return await step.do("4. Finish workflow", async () => ({
+      status: "completed",
+      score,
+      message: `Lead fully processed and qualified with score ${score}`,
+    }));
+  }
 }
