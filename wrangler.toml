@@ -1,0 +1,8 @@
+name = "workflows-starter-template"
+main = "worker/index.ts"
+compatibility_date = "2024-09-23"
+
+# Add this migrations section to your wrangler.toml
+[[migrations]]
+tag = "v1"
+new_classes = ["MyWorkflow"]
